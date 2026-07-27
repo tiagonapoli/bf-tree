@@ -480,8 +480,9 @@ impl CPRSnapShotMgr {
                 // reordering; on x86-64 both are plain mov, and store-then-load
                 // is the one reordering TSO permits.
                 //
-                // `snapshot/cpr_handshake_miri.rs` reproduces both this and the
-                // `sweep` freeze under Miri, on this code, at iteration 0.
+                // `snapshot/cpr_handshake_miri.rs` drives this code under Miri
+                // and observes the bad interleaving; the same handshake is
+                // checked exhaustively in `tla/` and with GenMC under RC11.
                 let current_global = self.global_state.load(Ordering::Acquire);
                 if self.get_local_state(&tid) != current_global
                     || self.pause_snapshot.load(Ordering::Acquire)
