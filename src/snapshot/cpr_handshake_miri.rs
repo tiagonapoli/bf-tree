@@ -50,7 +50,9 @@
 //! | --- | --- | --- | --- |
 //! | `-Zmiri-seed=0..3` | as-is | assertion fires | UB: dangling reference (use-after-free) |
 //! | `-Zmiri-seed=0..3 -Zmiri-disable-weak-memory-emulation` | as-is | passes | passes |
-//! | `-Zmiri-seed=0..3` | every ordering promoted to `SeqCst` | passes | passes |
+//! | `-Zmiri-seed=0..3` | `SeqCst` on the stores *and* the paired loads | passes | passes |
+//! | `-Zmiri-seed=0..3` | `SeqCst` on the stores only | assertion fires | UB: use-after-free |
+//! | `-Zmiri-seed=0..3` | `SeqCst` on the loads only | assertion fires | UB: use-after-free |
 //!
 //! The middle row is the load-bearing one. With weak memory emulation off Miri
 //! still explores thread interleavings, but every atomic load reads the latest
@@ -62,6 +64,20 @@
 //! ```text
 //! note: weak memory emulation: outdated value returned from load at 0x...
 //! ```
+//!
+//! The last three rows are why the comments in the parent module ask for
+//! `SeqCst` on both sides rather than on the stores alone. Promoting only one
+//! side leaves both tests failing, because `SeqCst`'s total order constrains
+//! `SeqCst` operations only and an `Acquire` load on either side is not in it.
+//! The `SeqCst` rows patch exactly the ten handshake sites -- the announce
+//! store, the `global_state` store, the two `pause_snapshot` stores, and the
+//! six loads paired with them -- leaving every other ordering untouched.
+//!
+//! GenMC reaches the same four verdicts under RC11 by exhaustive exploration,
+//! which is the stronger claim. Note the TLA+ x86-TSO model in `tla/` disagrees
+//! on stores-only, and is also right: a `SeqCst` store lowers to `XCHG` on
+//! x86-64, so stores-only does close the window *in hardware*. It is the
+//! language model that still permits it, and a fix has to satisfy the language.
 //!
 //! Test 1's assertion is also unreachable under sequential consistency by
 //! construction; see its doc comment.
