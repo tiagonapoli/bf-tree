@@ -42,13 +42,18 @@ run() {
   rm -f "$output"
 }
 
+echo "========= x86-TSO memory model (validates X86TSO.tla) ========="
+run SBLitmus SBLitmus_NoFence.cfg VIOLATED "the model permits StoreLoad, as x86 does"
+run SBLitmus SBLitmus_Fence.cfg   HOLDS    "MFENCE closes it; nothing else was quietly closing it"
+
+echo ""
 echo "========= CPR snapshot phase handshake on x86-TSO ========="
-run BfTreeCprHandshake BfTreeCprHandshake_None.cfg         VIOLATED "upstream Release/Acquire; the :432 double-check reads a stale global_state"
+run BfTreeCprHandshake BfTreeCprHandshake_None.cfg         VIOLATED "upstream Release/Acquire; the double-check reads a stale global_state"
 run BfTreeCprHandshake BfTreeCprHandshake_SeqCstStores.cfg HOLDS    "SeqCst stores only -- closes it on x86, NOT in the Rust memory model"
 
 echo ""
 echo "========= CPR snapshot sweep freeze on x86-TSO ========="
-run BfTreeCprSweep BfTreeCprSweep_None.cfg         VIOLATED "upstream Release/Acquire; sweep reclaims under a live writer"
+run BfTreeCprSweep BfTreeCprSweep_None.cfg         VIOLATED "upstream Release/Acquire; sweep walks the tree under a live writer"
 run BfTreeCprSweep BfTreeCprSweep_SeqCstStores.cfg HOLDS    "SeqCst stores only -- closes it on x86, NOT in the Rust memory model"
 
 echo ""

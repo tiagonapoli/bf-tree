@@ -1,19 +1,20 @@
------------------------------ MODULE BfTreeCprSweep -----------------------------
+---------------------------- MODULE BfTreeCprSweep ----------------------------
 (***************************************************************************)
-(* Bf-Tree's CPR snapshot SWEEP FREEZE on x86-TSO.                          *)
+(* Bf-Tree's CPR snapshot SWEEP FREEZE, on the x86-TSO model in X86TSO.tla. *)
 (*                                                                         *)
-(* Source: bf-tree @ ad17a2e, src/snapshot.rs                              *)
-(*   Manager sweep                   :556 STORE pause_snapshot = true      *)
-(*                                   :558 LOAD  thread_local_states[..]    *)
-(*                                        (check_if_phase_completed)       *)
-(*                                   :561+ traverse the tree and reclaim   *)
-(*   Worker  reserve_thread_slot     :406 LOAD  pause_snapshot (early out) *)
-(*                                   :415 CAS   thread_slots[tid]          *)
-(*                                   :421 STORE thread_local_states[tid]   *)
-(*                                   :434 LOAD  pause_snapshot (re-check)  *)
+(* Source: src/snapshot.rs                                                 *)
+(*   Manager sweep                    STORE pause_snapshot = true          *)
+(*                                    LOAD  thread_local_states[..]        *)
+(*                                          (check_if_phase_completed)     *)
+(*                                    then traverse the tree               *)
+(*   Worker  reserve_thread_slot      LOAD  pause_snapshot (early out)     *)
+(*                                    CAS   thread_slots[tid]              *)
+(*                                    STORE thread_local_states[tid]       *)
+(*                                    LOAD  pause_snapshot (re-check)      *)
 (*                                                                         *)
-(* Same StoreLoad window as BfTreeCprHandshake.tla, but here the manager's  *)
-(* next act is destructive. sweep's three-phase comment (:550-553) reads:   *)
+(* Same StoreLoad window as BfTreeCprHandshake.tla, but here what follows   *)
+(* the handshake is unsynchronised access to the tree. sweep's three-phase  *)
+(* comment reads:                                                          *)
 (*                                                                         *)
 (*   Phase 1: Block all snapshot id reservation, drain the thread table.    *)
 (*   Phase 2: Traverse the tree and take snapshots of inner nodes ...       *)
@@ -21,11 +22,12 @@
 (*                                                                         *)
 (* Phase 1 is a store-then-load on both sides, so the drain can report an   *)
 (* empty thread table while the worker is being handed a slot. The tree is  *)
-(* then not frozen, and phase 2 collects and reclaims inner nodes under a   *)
-(* live writer.                                                            *)
+(* then not frozen, and phase 2 walks it dereferencing raw *const InnerNode *)
+(* pointers, twice noting "No need for WriteGuard as the tree structure is  *)
+(* frozen and there are no active writers".                                 *)
 (*                                                                         *)
-(* This is the Bf-Tree analogue of LightEpoch.tla: same invariant, same     *)
-(* shape of counterexample, different codebase and language.                *)
+(* `unsafeAccess` below stands for that phase-2 access. The invariant is    *)
+(* that it never coincides with a live writer.                              *)
 (*                                                                         *)
 (* Fix values are as in BfTreeCprHandshake.tla: "None" -> VIOLATED,         *)
 (* "SeqCstStores" -> HOLDS on x86 only.                                     *)
@@ -36,130 +38,121 @@ CONSTANT Fix
 
 W == "worker"
 M == "manager"
+
 Procs == {W, M}
+
+\* pause = pause_snapshot
+\* tls   = thread_local_states[tid]
+\* slot  = thread_slots[tid]
+Locs == {"pause", "tls", "slot"}
 
 LiveState    == 0
 InvalidState == 9      \* INVALID_SNAPSHOT_STATE
 
-VARIABLES buf, mem, holds, pcW, pcM
-vars == <<buf, mem, holds, pcW, pcM>>
+VARIABLES buf, mem, holds, unsafeAccess, pcW, pcM
+vars == <<buf, mem, holds, unsafeAccess, pcW, pcM>>
 
-Max(S) == CHOOSE x \in S : \A y \in S : y <= x
-
-Load(p, f) ==
-    LET idxs == { i \in DOMAIN buf[p] : buf[p][i].f = f }
-    IN  IF idxs = {} THEN mem[f] ELSE buf[p][Max(idxs)].v
+TSO == INSTANCE X86TSO
 
 FencedStores == Fix = "SeqCstStores"
 
+Announce(p, loc, val) ==
+    IF FencedStores THEN TSO!LockedStore(p, loc, val) ELSE TSO!Store(p, loc, val)
+
 Init ==
-    /\ buf = [p \in Procs |-> <<>>]
-    /\ mem = [ pause |-> 0, tls |-> InvalidState, slot |-> 0, freed |-> 0 ]
+    /\ TSO!TSOInit([l \in Locs |->
+           IF l = "tls" THEN InvalidState ELSE 0])
     /\ holds = FALSE
+    /\ unsafeAccess = FALSE
     /\ pcW = "early"
     /\ pcM = "pause"
 
-Flush(p) ==
-    /\ buf[p] # <<>>
-    /\ mem' = [mem EXCEPT ![Head(buf[p]).f] = Head(buf[p]).v]
-    /\ buf' = [buf EXCEPT ![p] = Tail(buf[p])]
-    /\ UNCHANGED <<holds, pcW, pcM>>
+DoFlush(p) ==
+    /\ TSO!Flush(p)
+    /\ UNCHANGED <<holds, unsafeAccess, pcW, pcM>>
 
 \* Worker --------------------------------------------------------------------
 
-\* :406 if self.pause_snapshot.load(Acquire) { return Err(()) }
+\* if self.pause_snapshot.load(Acquire) { return Err(()) }
 Early ==
     /\ pcW = "early"
-    /\ IF Load(W, "pause") = 1
-       THEN pcW' = "done"
-       ELSE pcW' = "cas"
-    /\ UNCHANGED <<buf, mem, holds, pcM>>
+    /\ IF TSO!Load(W, "pause") = 1 THEN pcW' = "done" ELSE pcW' = "cas"
+    /\ UNCHANGED <<buf, mem, holds, unsafeAccess, pcM>>
 
-\* :415 compare_exchange(false, true, AcqRel, Relaxed). A LOCKed RMW, hence a
-\* full barrier -- but it precedes the announce store, so it orders nothing.
+\* compare_exchange(false, true, AcqRel, Relaxed). A LOCKed RMW, hence a full
+\* barrier -- but it precedes the announce store, so it orders nothing here.
 Cas ==
     /\ pcW = "cas"
-    /\ mem.slot = 0
-    /\ buf[W] = <<>>
-    /\ mem' = [mem EXCEPT !.slot = 1]
+    /\ TSO!Load(W, "slot") = 0
+    /\ TSO!Rmw(W, "slot", 1)
     /\ pcW' = "announce"
-    /\ UNCHANGED <<buf, holds, pcM>>
+    /\ UNCHANGED <<holds, unsafeAccess, pcM>>
 
-\* :421 -> :304 announce that this slot is live.
-Announce ==
+\* set_local_state: announce that this slot is live.
+DoAnnounce ==
     /\ pcW = "announce"
-    /\ IF FencedStores
-       THEN /\ buf[W] = <<>>
-            /\ mem' = [mem EXCEPT !.tls = LiveState]
-            /\ UNCHANGED buf
-       ELSE /\ buf' = [buf EXCEPT ![W] = Append(buf[W], [f |-> "tls", v |-> LiveState])]
-            /\ UNCHANGED mem
+    /\ Announce(W, "tls", LiveState)
     /\ pcW' = "recheck"
-    /\ UNCHANGED <<holds, pcM>>
+    /\ UNCHANGED <<holds, unsafeAccess, pcM>>
 
-\* :434 || self.pause_snapshot.load(Acquire)  -> roll back, else the slot is
-\* granted and the caller may mutate the tree structure.
+\* || self.pause_snapshot.load(Acquire)  -> roll back, else the slot is granted
+\* and the caller may mutate the tree structure.
 Recheck ==
     /\ pcW = "recheck"
-    /\ IF Load(W, "pause") = 1
+    /\ IF TSO!Load(W, "pause") = 1
        THEN /\ holds' = FALSE
-            /\ buf' = [buf EXCEPT ![W] = Append(buf[W], [f |-> "tls", v |-> InvalidState])]
+            /\ TSO!Store(W, "tls", InvalidState)
             /\ pcW' = "done"
        ELSE /\ holds' = TRUE
+            /\ UNCHANGED <<buf, mem>>
             /\ pcW' = "use"
-            /\ UNCHANGED buf
-    /\ UNCHANGED <<mem, pcM>>
+    /\ UNCHANGED <<unsafeAccess, pcM>>
 
-\* The guard is held: the caller is inside the tree (try_split_inner, write_inner,
-\* WriteGuard::insert, ...) dereferencing inner nodes.
+\* The slot is held: the caller is inside the tree (try_split_inner,
+\* write_inner, WriteGuard::insert, ...) mutating inner nodes.
 Use ==
     /\ pcW = "use"
     /\ holds' = FALSE
     /\ pcW' = "done"
-    /\ UNCHANGED <<buf, mem, pcM>>
+    /\ UNCHANGED <<buf, mem, unsafeAccess, pcM>>
 
 \* Manager -------------------------------------------------------------------
 
-\* :556 self.pause_snapshot.store(true, Release)
+\* self.pause_snapshot.store(true, Release)
 Pause ==
     /\ pcM = "pause"
-    /\ IF FencedStores
-       THEN /\ buf[M] = <<>>
-            /\ mem' = [mem EXCEPT !.pause = 1]
-            /\ UNCHANGED buf
-       ELSE /\ buf' = [buf EXCEPT ![M] = Append(buf[M], [f |-> "pause", v |-> 1])]
-            /\ UNCHANGED mem
+    /\ Announce(M, "pause", 1)
     /\ pcM' = "drain"
-    /\ UNCHANGED <<holds, pcW>>
+    /\ UNCHANGED <<holds, unsafeAccess, pcW>>
 
-\* :558 check_if_phase_completed(INVALID_SNAPSHOT_STATE): if every slot reads
-\* INVALID the tree is considered frozen and phase 2 reclaims inner nodes.
+\* check_if_phase_completed(INVALID_SNAPSHOT_STATE): if every slot reads
+\* INVALID the tree is considered frozen and phase 2 walks it without guards.
 Drain ==
     /\ pcM = "drain"
-    /\ IF Load(M, "tls") = InvalidState
-       THEN /\ mem' = [mem EXCEPT !.freed = 1]
+    /\ IF TSO!Load(M, "tls") = InvalidState
+       THEN /\ unsafeAccess' = TRUE
             /\ pcM' = "done"
-       ELSE /\ pcM' = "retry"
-            /\ UNCHANGED mem
-    /\ UNCHANGED <<buf, holds, pcW>>
+       ELSE /\ UNCHANGED unsafeAccess
+            /\ pcM' = "retry"
+    /\ UNCHANGED <<buf, mem, holds, pcW>>
 
 \* The real code spins here. One retry is enough to show the loop does not
 \* help: the decision was already taken on a stale read.
 Retry ==
     /\ pcM = "retry"
     /\ pcM' = "drain"
-    /\ UNCHANGED <<buf, mem, holds, pcW>>
+    /\ UNCHANGED <<buf, mem, holds, unsafeAccess, pcW>>
 
 Next ==
-    \/ Early \/ Cas \/ Announce \/ Recheck \/ Use
+    \/ Early \/ Cas \/ DoAnnounce \/ Recheck \/ Use
     \/ Pause \/ Drain \/ Retry
-    \/ (\E p \in Procs : Flush(p))
+    \/ (\E p \in Procs : DoFlush(p))
 
 Spec == Init /\ [][Next]_vars
 
 (***************************************************************************)
-(* SAFETY: sweep must never reclaim an inner node while a worker still      *)
-(* holds a slot and is inside the tree.                                     *)
+(* SAFETY: sweep must never touch the tree structure unguarded while a      *)
+(* worker still holds a slot and is inside the tree.                        *)
 (***************************************************************************)
-NoUseAfterFree == ~ (mem.freed = 1 /\ holds)
-=============================================================================
+NoUnguardedAccess == ~ (unsafeAccess /\ holds)
+===============================================================================
