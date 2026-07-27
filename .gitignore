@@ -6,3 +6,6 @@
 /.vs
 /.vscode
 /.jj
+
+# cached by tla/run.sh
+/tla/.tla2tools.jar

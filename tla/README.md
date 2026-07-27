@@ -44,15 +44,20 @@ admit the SB outcome would be too strong to trust, and one that admitted it
 ## Running
 
 ```sh
-docker build -f tla/Dockerfile -t bftree-tla tla
-docker run --rm bftree-tla
+./tla/run.sh
 ```
 
-Or, with `tla2tools.jar` already on disk:
+Needs Java 11+ and `curl`; `tla2tools.jar` is downloaded on first run and cached
+in `tla/`. Set `TLA_TOOLS` to point at a copy you already have.
+
+If you would rather not install Java:
 
 ```sh
-TLA_TOOLS=/path/to/tla2tools.jar tla/run.sh
+docker build -f tla/Dockerfile -t bftree-tla tla && docker run --rm bftree-tla
 ```
+
+Either way the script checks every spec against its expected result and exits
+non-zero if any of them disagrees.
 
 ## Results
 

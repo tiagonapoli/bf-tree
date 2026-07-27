@@ -1,12 +1,45 @@
 #!/usr/bin/env bash
 # Model-check the CPR snapshot specs and report each result against its
-# expectation. Requires Java + tla2tools.jar (see Dockerfile), or set TLA_TOOLS
-# to the path of tla2tools.jar.
+# expectation.
+#
+#   ./tla/run.sh
+#
+# Needs Java 11+ and curl (or wget). tla2tools.jar is downloaded on first run
+# and cached next to this script. Set TLA_TOOLS to use a copy you already have,
+# or use the Dockerfile here if you would rather not install Java.
 set -u
 
-JAR="${TLA_TOOLS:-/opt/tla2tools.jar}"
-TLC=(java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -workers auto -deadlock -cleanup)
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+JAR="${TLA_TOOLS:-}"
+if [[ -z "$JAR" && -f /opt/tla2tools.jar ]]; then
+  JAR=/opt/tla2tools.jar
+fi
+if [[ -z "$JAR" ]]; then
+  JAR="$HERE/.tla2tools.jar"
+fi
+
+if ! command -v java >/dev/null 2>&1; then
+  echo "error: java not found. Install a JRE (11 or newer), or run the checks in Docker:" >&2
+  echo "  docker build -f tla/Dockerfile -t bftree-tla tla && docker run --rm bftree-tla" >&2
+  exit 1
+fi
+
+if [[ ! -f "$JAR" ]]; then
+  URL="https://github.com/tlaplus/tlaplus/releases/latest/download/tla2tools.jar"
+  echo "Downloading tla2tools.jar to $JAR ..."
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$URL" -o "$JAR.tmp" || { echo "error: download failed" >&2; exit 1; }
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$JAR.tmp" "$URL" || { echo "error: download failed" >&2; exit 1; }
+  else
+    echo "error: need curl or wget to fetch tla2tools.jar, or set TLA_TOOLS" >&2
+    exit 1
+  fi
+  mv "$JAR.tmp" "$JAR"
+fi
+
+TLC=(java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -workers auto -deadlock -cleanup)
 failures=0
 
 run() {
