@@ -11,3 +11,6 @@ mod inner_root_recovery;
 mod tree;
 
 mod concurrent;
+
+#[cfg(not(feature = "shuttle"))]
+mod drop;
