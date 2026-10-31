@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3.7.0
       - run: rustup component add rustfmt clippy 
       - run: cargo install -f cargo-fuzz
       # Temporarily allow warnings due to spdk feature disabled in benchmark.
@@ -35,7 +35,7 @@ jobs:
     env:
       RUST_BACKTRACE: 1
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3.7.0
       - run: rustup component add rust-src
       - run: rustup toolchain install nightly --component rust-src
       - run: sudo apt update && sudo apt install -y llvm-dev
@@ -49,12 +49,32 @@ jobs:
       # - run: >
       #     env RUSTFLAGS="-Z sanitizer=memory"
       #     cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --tests
+      # Shuttle's atomics/platform shims require cfg(test); exclude integration targets.
       - run: >
           env RUST_BACKTRACE=1
-          cargo test --features "shuttle" --release shuttle_bf_tree_concurrent_operations
+          cargo test --lib --features "shuttle" --release shuttle_bf_tree_concurrent_operations
       - run: >
           env RUST_BACKTRACE=1
-          cargo test --features "shuttle" --release shuttle_cpr_snapshot_disk
+          cargo test --lib --features "shuttle" --release shuttle_cpr_snapshot_disk
       - run: >
           env RUST_BACKTRACE=1
-          cargo test --features "shuttle" --release shuttle_cpr_snapshot_cache_only
+          cargo test --lib --features "shuttle" --release shuttle_cpr_snapshot_cache_only
+
+  miri:
+    needs: check-fmt-build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      RUST_BACKTRACE: 1
+    steps:
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3.7.0
+      - run: rustup toolchain install nightly --component miri --component rust-src
+      - run: cargo +nightly miri setup
+      # CPR handshake weak-memory litmus tests. Weak-memory emulation is on by
+      # default (the meaningful configuration); seeds 0..3 match the controls
+      # documented in the `cpr_handshake_miri` module in src/snapshot.rs.
+      - name: CPR handshake Miri litmus tests
+        run: |
+          for seed in 0 1 2 3; do
+            MIRIFLAGS="-Zmiri-seed=$seed" cargo +nightly miri test --lib snapshot::cpr_handshake_miri
+          done
