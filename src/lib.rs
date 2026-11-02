@@ -30,6 +30,7 @@ mod utils;
 
 pub use config::{Config, StorageBackend, WalConfig};
 pub use error::ConfigError;
+pub use fs::{overlay_stats, OverlayStats};
 pub use nodes::leaf_node::LeafReadResult;
 pub use range_scan::{ScanIter, ScanReturnField};
 pub use tree::{BfTree, LeafInsertResult, ScanIterError};
